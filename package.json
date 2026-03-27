@@ -1,0 +1,6 @@
+{
+  "name": "lookout-wordpress",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WordPress plugin — POST errors to Lookout ingest API"
+}
