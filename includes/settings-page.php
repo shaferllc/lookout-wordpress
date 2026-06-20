@@ -1,8 +1,6 @@
 <?php
 /**
  * Settings UI under Settings → Lookout.
- *
- * @package Lookout
  */
 
 declare(strict_types=1);
@@ -15,13 +13,13 @@ if (! defined('ABSPATH')) {
 <div class="wrap">
     <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
 
-    <?php if (isset($_GET['lookout_test'])) : ?>
-        <?php if ((string) $_GET['lookout_test'] === '1') : ?>
+    <?php if (isset($_GET['lookout_test'])) { ?>
+        <?php if ((string) $_GET['lookout_test'] === '1') { ?>
             <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Test event sent. Check your Lookout project for a new issue.', 'lookout'); ?></p></div>
-        <?php else : ?>
+        <?php } else { ?>
             <div class="notice notice-error is-dismissible"><p><?php esc_html_e('Could not send test: enable the plugin and fill API key and base URL.', 'lookout'); ?></p></div>
-        <?php endif; ?>
-    <?php endif; ?>
+        <?php } ?>
+    <?php } ?>
 
     <p class="description">
         <?php
@@ -29,7 +27,7 @@ if (! defined('ABSPATH')) {
             'Sends uncaught exceptions and fatal PHP errors to your Lookout project. Use a dedicated project API key from Lookout project settings.',
             'lookout'
         );
-        ?>
+?>
     </p>
 
     <form action="options.php" method="post" class="lookout-settings" style="max-width: 42rem; margin-top: 1.5rem;">
@@ -69,6 +67,16 @@ if (! defined('ABSPATH')) {
                     <input type="text" class="regular-text" id="lookout_environment" name="lookout_environment"
                            value="<?php echo esc_attr((string) get_option('lookout_environment', 'production')); ?>" />
                     <p class="description"><?php esc_html_e('Tagged on each event (e.g. production, staging).', 'lookout'); ?></p>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row"><?php esc_html_e('404 pages', 'lookout'); ?></th>
+                <td>
+                    <input type="hidden" name="lookout_report_http_404" value="0" />
+                    <label>
+                        <input type="checkbox" name="lookout_report_http_404" value="1" <?php checked(get_option('lookout_report_http_404', true)); ?> />
+                        <?php esc_html_e('Report missing pages (HTTP 404) to Lookout', 'lookout'); ?>
+                    </label>
                 </td>
             </tr>
         </table>

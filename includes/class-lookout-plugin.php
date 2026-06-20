@@ -1,8 +1,7 @@
 <?php
+
 /**
  * Bootstrap: hooks, error capture, settings.
- *
- * @package Lookout
  */
 
 declare(strict_types=1);
@@ -15,7 +14,7 @@ final class Lookout_Plugin
 {
     private static ?self $instance = null;
 
-    /** @var null|callable(\Throwable): void */
+    /** @var null|callable(Throwable): void */
     private $previous_exception_handler = null;
 
     public static function instance(): self
@@ -53,6 +52,54 @@ final class Lookout_Plugin
             $this->previous_exception_handler = $prev;
         }
         register_shutdown_function([$this, 'handle_shutdown']);
+        add_action('template_redirect', [$this, 'maybe_report_http_not_found'], 999);
+    }
+
+    public function maybe_report_http_not_found(): void
+    {
+        if (! $this->capture_enabled() || ! $this->report_http_404_enabled()) {
+            return;
+        }
+
+        if (! function_exists('is_404') || ! is_404()) {
+            return;
+        }
+
+        if (Lookout_Client::is_sending()) {
+            return;
+        }
+
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
+        $uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash((string) $_SERVER['REQUEST_URI']) : '/';
+        $path = wp_parse_url($uri, PHP_URL_PATH);
+        if (! is_string($path) || $path === '') {
+            $path = '/';
+        }
+        $url = $this->current_request_url();
+
+        Lookout_Client::send([
+            'message' => 'HTTP 404 Not Found: '.$method.' '.$path,
+            'exception_class' => 'LookoutWordPressHttpNotFound',
+            'level' => 'warning',
+            'handled' => true,
+            'language' => 'php',
+            'route' => $path,
+            'url' => $url,
+            'environment' => (string) get_option('lookout_environment', 'production'),
+            'context' => array_merge($this->base_context(), [
+                'http' => [
+                    'method' => $method,
+                    'status_code' => 404,
+                    'url' => $url,
+                    'path' => $path,
+                ],
+            ]),
+        ]);
+    }
+
+    public function report_http_404_enabled(): bool
+    {
+        return (bool) get_option('lookout_report_http_404', true);
     }
 
     public function capture_enabled(): bool
@@ -113,6 +160,13 @@ final class Lookout_Plugin
             },
             'default' => 'production',
         ]);
+        register_setting('lookout', 'lookout_report_http_404', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => true,
+        ]);
     }
 
     public function render_settings_page(): void
@@ -152,7 +206,7 @@ final class Lookout_Plugin
         exit;
     }
 
-    public function handle_exception(\Throwable $e): void
+    public function handle_exception(Throwable $e): void
     {
         if ($this->capture_enabled() && ! Lookout_Client::is_sending()) {
             Lookout_Client::send($this->payload_from_throwable($e));
@@ -200,7 +254,7 @@ final class Lookout_Plugin
     /**
      * @return array<string, mixed>
      */
-    private function payload_from_throwable(\Throwable $e): array
+    private function payload_from_throwable(Throwable $e): array
     {
         return [
             'message' => $e->getMessage(),
