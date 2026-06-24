@@ -79,6 +79,19 @@ if (! defined('ABSPATH')) {
                     </label>
                 </td>
             </tr>
+            <tr>
+                <th scope="row"><?php esc_html_e('Browser monitoring (RUM)', 'lookout'); ?></th>
+                <td>
+                    <input type="hidden" name="lookout_rum_enabled" value="0" />
+                    <label>
+                        <input type="checkbox" name="lookout_rum_enabled" value="1" <?php checked(get_option('lookout_rum_enabled', false)); ?> />
+                        <?php esc_html_e('Collect Web Vitals and front-end JavaScript errors from visitors', 'lookout'); ?>
+                    </label>
+                    <p class="description">
+                        <?php esc_html_e('Runs a small script in your visitors\' browsers to measure page-load performance (LCP, CLS, INP) and report front-end errors. No cookies are set and no IP is collected by the script. Disclose this in your site\'s privacy policy before enabling.', 'lookout'); ?>
+                    </p>
+                </td>
+            </tr>
         </table>
 
         <?php submit_button(__('Save changes', 'lookout')); ?>

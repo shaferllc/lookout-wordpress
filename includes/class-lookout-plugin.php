@@ -32,6 +32,8 @@ final class Lookout_Plugin
             add_action('admin_menu', [$this, 'register_settings_page']);
             add_action('admin_init', [$this, 'register_settings']);
             add_action('admin_post_lookout_send_test', [$this, 'handle_send_test']);
+            add_action('admin_post_lookout_consent', [$this, 'handle_consent']);
+            add_action('admin_notices', [$this, 'maybe_render_consent_notice']);
         }
 
         add_action('wp_loaded', [$this, 'maybe_register_error_handlers'], 999);
@@ -57,7 +59,7 @@ final class Lookout_Plugin
 
     public function maybe_report_http_not_found(): void
     {
-        if (! $this->capture_enabled() || ! $this->report_http_404_enabled()) {
+        if (! $this->capture_enabled() || ! $this->report_http_404_enabled() || ! Lookout_Config::is_enabled('errors')) {
             return;
         }
 
@@ -167,6 +169,14 @@ final class Lookout_Plugin
             },
             'default' => true,
         ]);
+        // Off until the site owner opts in: RUM runs in visitors' browsers, so it needs consent.
+        register_setting('lookout', 'lookout_rum_enabled', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => false,
+        ]);
     }
 
     public function render_settings_page(): void
@@ -206,9 +216,76 @@ final class Lookout_Plugin
         exit;
     }
 
+    public function maybe_render_consent_notice(): void
+    {
+        if (! Lookout_Consent::needs_prompt()) {
+            return;
+        }
+
+        $action = esc_url(admin_url('admin-post.php'));
+        $nonce = wp_nonce_field('lookout_consent', '_wpnonce', true, false);
+        $message = esc_html__('Lookout can also measure page-load performance in your visitors\' browsers (Web Vitals + front-end JS errors) and attach the signed-in user to error reports. This collects performance and personal data, so it stays off until you accept. Error and fatal reporting work either way.', 'lookout');
+        $accept = esc_html__('Enable browser monitoring', 'lookout');
+        $decline = esc_html__('Errors only', 'lookout');
+
+        echo '<div class="notice notice-info"><p>'.$message.'</p><p>';
+        echo '<form action="'.$action.'" method="post" style="display:inline-block;margin-right:.5rem;">'.$nonce;
+        echo '<input type="hidden" name="action" value="lookout_consent" /><input type="hidden" name="lookout_decision" value="accept" />';
+        echo '<button type="submit" class="button button-primary">'.$accept.'</button></form>';
+        echo '<form action="'.$action.'" method="post" style="display:inline-block;">'.$nonce;
+        echo '<input type="hidden" name="action" value="lookout_consent" /><input type="hidden" name="lookout_decision" value="decline" />';
+        echo '<button type="submit" class="button">'.$decline.'</button></form>';
+        echo '</p></div>';
+    }
+
+    public function handle_consent(): void
+    {
+        if (! current_user_can('manage_options')) {
+            wp_die(esc_html__('Forbidden.', 'lookout'), '', ['response' => 403]);
+        }
+        check_admin_referer('lookout_consent');
+
+        $decision = isset($_POST['lookout_decision']) ? sanitize_text_field(wp_unslash((string) $_POST['lookout_decision'])) : '';
+        $user_id = get_current_user_id();
+        if ($decision === 'accept') {
+            Lookout_Consent::grant($user_id);
+        } else {
+            Lookout_Consent::decline($user_id);
+        }
+
+        wp_safe_redirect(wp_get_referer() ?: admin_url('options-general.php?page=lookout'));
+        exit;
+    }
+
+    /**
+     * The signed-in user attached to error reports — only once consent is granted (it is PII).
+     * IP is never included, per the plugin's redaction posture.
+     *
+     * @return array<string, string>|null
+     */
+    private function current_user_payload(): ?array
+    {
+        if (! Lookout_Consent::granted() || ! function_exists('wp_get_current_user')) {
+            return null;
+        }
+        $user = wp_get_current_user();
+        if (! $user || (int) $user->ID === 0) {
+            return null;
+        }
+
+        $payload = array_filter([
+            'id' => (string) $user->ID,
+            'email' => (string) $user->user_email,
+            'username' => (string) $user->user_login,
+            'name' => (string) $user->display_name,
+        ], static fn (string $v): bool => $v !== '');
+
+        return $payload === [] ? null : $payload;
+    }
+
     public function handle_exception(Throwable $e): void
     {
-        if ($this->capture_enabled() && ! Lookout_Client::is_sending()) {
+        if ($this->capture_enabled() && Lookout_Config::is_enabled('errors') && ! Lookout_Client::is_sending()) {
             Lookout_Client::send($this->payload_from_throwable($e));
         }
 
@@ -223,7 +300,7 @@ final class Lookout_Plugin
 
     public function handle_shutdown(): void
     {
-        if (! $this->capture_enabled() || Lookout_Client::is_sending()) {
+        if (! $this->capture_enabled() || ! Lookout_Config::is_enabled('errors') || Lookout_Client::is_sending()) {
             return;
         }
 
@@ -237,7 +314,7 @@ final class Lookout_Plugin
             return;
         }
 
-        Lookout_Client::send([
+        $payload = [
             'message' => $last['message'],
             'exception_class' => 'PHPFatal_'.$last['type'],
             'level' => 'error',
@@ -248,7 +325,14 @@ final class Lookout_Plugin
             'environment' => (string) get_option('lookout_environment', 'production'),
             'url' => $this->current_request_url(),
             'context' => $this->base_context(),
-        ]);
+        ];
+
+        $user = $this->current_user_payload();
+        if ($user !== null) {
+            $payload['user'] = $user;
+        }
+
+        Lookout_Client::send($payload);
     }
 
     /**
@@ -256,7 +340,7 @@ final class Lookout_Plugin
      */
     private function payload_from_throwable(Throwable $e): array
     {
-        return [
+        $payload = [
             'message' => $e->getMessage(),
             'exception_class' => $e::class,
             'level' => 'error',
@@ -271,6 +355,13 @@ final class Lookout_Plugin
                 'exception_code' => $e->getCode(),
             ]),
         ];
+
+        $user = $this->current_user_payload();
+        if ($user !== null) {
+            $payload['user'] = $user;
+        }
+
+        return $payload;
     }
 
     /**
@@ -319,6 +410,7 @@ final class Lookout_Plugin
         global $wp_version;
 
         $ctx = [
+            'platform' => 'wordpress',
             'wordpress_version' => is_string($wp_version ?? null) ? $wp_version : '',
             'php_version' => PHP_VERSION,
             'is_admin' => is_admin(),
@@ -338,10 +430,45 @@ final class Lookout_Plugin
             $theme = wp_get_theme();
             if ($theme->exists()) {
                 $ctx['theme'] = $theme->get_stylesheet();
+                $version = $theme->get('Version');
+                if (is_string($version) && $version !== '') {
+                    $ctx['theme_version'] = $version;
+                }
             }
         }
 
+        $plugins = self::active_plugins_inventory();
+        if ($plugins !== []) {
+            $ctx['plugins'] = $plugins;
+        }
+
         return $ctx;
+    }
+
+    /**
+     * Active plugin slugs (single-site + network-active), capped to keep payloads small.
+     * Answers "which plugin caused this?" without loading the heavier wp-admin plugin API.
+     *
+     * @return list<string>
+     */
+    private static function active_plugins_inventory(): array
+    {
+        $active = get_option('active_plugins', []);
+        $slugs = is_array($active) ? array_values($active) : [];
+
+        if (is_multisite()) {
+            $network = get_site_option('active_sitewide_plugins', []);
+            if (is_array($network)) {
+                $slugs = array_merge($slugs, array_keys($network));
+            }
+        }
+
+        $slugs = array_values(array_unique(array_filter(
+            array_map(static fn ($slug): string => is_string($slug) ? $slug : '', $slugs),
+            static fn (string $slug): bool => $slug !== ''
+        )));
+
+        return array_slice($slugs, 0, 100);
     }
 
     private function current_request_url(): string

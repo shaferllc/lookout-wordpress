@@ -68,6 +68,41 @@ final class Lookout_Client
         self::$sending = false;
     }
 
+    /**
+     * Fire-and-forget POST of a trace payload to /api/ingest/trace. Non-blocking so it adds
+     * near-zero latency to the page; the X-Lookout-Client-Sampled header tells the server the
+     * SDK already head-sampled so it does not sample again.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public static function send_trace(array $payload): void
+    {
+        $api_key = (string) get_option('lookout_api_key', '');
+        $base = rtrim((string) get_option('lookout_base_url', ''), '/');
+
+        if ($api_key === '' || $base === '' || self::should_skip_for_same_host($base)) {
+            return;
+        }
+
+        $url = $base.'/api/ingest/trace';
+        $args = [
+            'timeout' => 0.01,
+            'blocking' => false,
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+                'X-Api-Key' => $api_key,
+                'X-Lookout-Client-Sampled' => '1',
+            ],
+            'body' => wp_json_encode($payload),
+        ];
+
+        /** This filter is documented on lookout_remote_post_args. */
+        $args = apply_filters('lookout_remote_post_args', $args, $payload, $url);
+
+        wp_remote_post($url, $args);
+    }
+
     private static function should_skip_for_same_host(string $base): bool
     {
         $ingest_host = wp_parse_url($base, PHP_URL_HOST);
