@@ -37,6 +37,14 @@ final class Lookout_Client
             return;
         }
 
+        // Drop errors ignored on the dashboard so they stop re-ingesting (matched on the payload's
+        // class + message, exactly what the server stored and keyed off).
+        $exception_class = isset($payload['exception_class']) && is_string($payload['exception_class']) ? $payload['exception_class'] : '';
+        $message = isset($payload['message']) && is_string($payload['message']) ? $payload['message'] : '';
+        if (Lookout_Config::is_error_suppressed($exception_class, $message)) {
+            return;
+        }
+
         if (self::should_skip_for_same_host($base)) {
             return;
         }

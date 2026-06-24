@@ -116,15 +116,93 @@ final class Lookout_Config
     }
 
     /**
+     * Client suppression keys for errors ignored on the dashboard, as a lookup set (key => true).
+     * The error sender drops any report whose {@see self::suppression_key()} is present, so ignored
+     * errors stop re-ingesting.
+     *
+     * @return array<string, true>
+     */
+    public static function suppressed_keys(): array
+    {
+        $config = self::remote_config();
+        $raw = $config['suppress'] ?? null;
+        if (! is_array($raw)) {
+            return [];
+        }
+
+        $keys = [];
+        foreach ($raw as $key) {
+            if (is_string($key) && $key !== '') {
+                $keys[$key] = true;
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Whether the dashboard has ignored this error (its suppression key is in the remote list).
+     */
+    public static function is_error_suppressed(string $exception_class, string $message): bool
+    {
+        $keys = self::suppressed_keys();
+        if ($keys === []) {
+            return false;
+        }
+
+        return isset($keys[self::suppression_key($exception_class, $message)]);
+    }
+
+    /**
+     * Stable 32-char client suppression key for an exception class + message. This recipe is a
+     * CONTRACT shared byte-for-byte with the Lookout server (App\Support\ErrorSuppressionKey) and the
+     * other SDKs — keep it identical or bump the version tag ("lkt_supp_v1") across all sides.
+     */
+    public static function suppression_key(string $exception_class, string $message): string
+    {
+        $class = mb_strtolower(trim($exception_class));
+
+        return substr(hash('sha256', 'lkt_supp_v1|'.$class.'|'.self::normalize_suppression_message($message)), 0, 32);
+    }
+
+    /**
+     * Lowercase, collapse whitespace, and mask volatile tokens (UUIDs, long id/hash runs, numbers).
+     */
+    private static function normalize_suppression_message(string $message): string
+    {
+        $s = mb_strtolower(trim($message));
+        $s = preg_replace('/\s+/u', ' ', $s) ?? $s;
+        $s = preg_replace('/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/', '<id>', $s) ?? $s;
+        $s = preg_replace('/[0-9a-z]{12,}/', '<id>', $s) ?? $s;
+        $s = preg_replace('/\b0x[0-9a-f]+\b/', '<n>', $s) ?? $s;
+        $s = preg_replace('/\d+/', '<n>', $s) ?? $s;
+
+        return mb_substr(trim($s), 0, 200);
+    }
+
+    /**
      * Cached per-signal config map from the server, or [] when unavailable.
      *
      * @return array<string, array<string, mixed>>
      */
     private static function remote_signals(): array
     {
+        $config = self::remote_config();
+
+        return isset($config['signals']) && is_array($config['signals']) ? $config['signals'] : [];
+    }
+
+    /**
+     * The full cached /api/config document (signals + suppress + ttl), or [] when unavailable.
+     * Fetches and caches on a miss; honors a cached "unavailable" negative result.
+     *
+     * @return array<string, mixed>
+     */
+    private static function remote_config(): array
+    {
         $cached = get_transient(self::TRANSIENT);
         if (is_array($cached)) {
-            return isset($cached['signals']) && is_array($cached['signals']) ? $cached['signals'] : [];
+            return $cached;
         }
         if ($cached === 'unavailable') {
             return [];
@@ -142,7 +220,7 @@ final class Lookout_Config
             : 300;
         set_transient(self::TRANSIENT, $config, $ttl);
 
-        return isset($config['signals']) && is_array($config['signals']) ? $config['signals'] : [];
+        return $config;
     }
 
     /**

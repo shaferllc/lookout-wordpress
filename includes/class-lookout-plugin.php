@@ -71,32 +71,36 @@ final class Lookout_Plugin
             return;
         }
 
-        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
-        $uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash((string) $_SERVER['REQUEST_URI']) : '/';
-        $path = wp_parse_url($uri, PHP_URL_PATH);
-        if (! is_string($path) || $path === '') {
-            $path = '/';
-        }
-        $url = $this->current_request_url();
+        try {
+            $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
+            $uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash((string) $_SERVER['REQUEST_URI']) : '/';
+            $path = wp_parse_url($uri, PHP_URL_PATH);
+            if (! is_string($path) || $path === '') {
+                $path = '/';
+            }
+            $url = $this->current_request_url();
 
-        Lookout_Client::send([
-            'message' => 'HTTP 404 Not Found: '.$method.' '.$path,
-            'exception_class' => 'LookoutWordPressHttpNotFound',
-            'level' => 'warning',
-            'handled' => true,
-            'language' => 'php',
-            'route' => $path,
-            'url' => $url,
-            'environment' => (string) get_option('lookout_environment', 'production'),
-            'context' => array_merge($this->base_context(), [
-                'http' => [
-                    'method' => $method,
-                    'status_code' => 404,
-                    'url' => $url,
-                    'path' => $path,
-                ],
-            ]),
-        ]);
+            Lookout_Client::send([
+                'message' => 'HTTP 404 Not Found: '.$method.' '.$path,
+                'exception_class' => 'LookoutWordPressHttpNotFound',
+                'level' => 'warning',
+                'handled' => true,
+                'language' => 'php',
+                'route' => $path,
+                'url' => $url,
+                'environment' => (string) get_option('lookout_environment', 'production'),
+                'context' => array_merge($this->base_context(), [
+                    'http' => [
+                        'method' => $method,
+                        'status_code' => 404,
+                        'url' => $url,
+                        'path' => $path,
+                    ],
+                ]),
+            ]);
+        } catch (\Throwable $e) {
+            error_log('Lookout: failed to report 404: '.$e->getMessage());
+        }
     }
 
     public function report_http_404_enabled(): bool
@@ -316,8 +320,14 @@ final class Lookout_Plugin
 
     public function handle_exception(Throwable $e): void
     {
-        if ($this->capture_enabled() && Lookout_Config::is_enabled('errors') && ! Lookout_Client::is_sending()) {
-            Lookout_Client::send($this->payload_from_throwable($e));
+        // Never let reporting throw from inside the exception handler — that would be an unrecoverable
+        // fatal. Swallow any failure and still chain/re-throw the original exception below.
+        try {
+            if ($this->capture_enabled() && Lookout_Config::is_enabled('errors') && ! Lookout_Client::is_sending()) {
+                Lookout_Client::send($this->payload_from_throwable($e));
+            }
+        } catch (Throwable $reportingError) {
+            error_log('Lookout: failed to report exception: '.$reportingError->getMessage());
         }
 
         if ($this->previous_exception_handler !== null) {
@@ -345,25 +355,29 @@ final class Lookout_Plugin
             return;
         }
 
-        $payload = [
-            'message' => $last['message'],
-            'exception_class' => 'PHPFatal_'.$last['type'],
-            'level' => 'error',
-            'file' => $last['file'],
-            'line' => $last['line'],
-            'stack_trace' => '',
-            'language' => 'php',
-            'environment' => (string) get_option('lookout_environment', 'production'),
-            'url' => $this->current_request_url(),
-            'context' => $this->base_context(),
-        ];
+        try {
+            $payload = [
+                'message' => $last['message'],
+                'exception_class' => 'PHPFatal_'.$last['type'],
+                'level' => 'error',
+                'file' => $last['file'],
+                'line' => $last['line'],
+                'stack_trace' => '',
+                'language' => 'php',
+                'environment' => (string) get_option('lookout_environment', 'production'),
+                'url' => $this->current_request_url(),
+                'context' => $this->base_context(),
+            ];
 
-        $user = $this->current_user_payload();
-        if ($user !== null) {
-            $payload['user'] = $user;
+            $user = $this->current_user_payload();
+            if ($user !== null) {
+                $payload['user'] = $user;
+            }
+
+            Lookout_Client::send($payload);
+        } catch (Throwable $e) {
+            error_log('Lookout: failed to report fatal: '.$e->getMessage());
         }
-
-        Lookout_Client::send($payload);
     }
 
     /**

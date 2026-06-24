@@ -64,12 +64,17 @@ final class Lookout_Rum
 
     public static function render(): void
     {
-        if (! self::enabled()) {
-            return;
-        }
+        try {
+            if (! self::enabled()) {
+                return;
+            }
 
-        $config = wp_json_encode(self::script_config());
-        echo "<script>(function(){var c=".$config.";".self::snippet().'})();</script>';
+            $config = wp_json_encode(self::script_config());
+            echo "<script>(function(){var c=".$config.";".self::snippet().'})();</script>';
+        } catch (\Throwable $e) {
+            // Never let beacon injection break the page footer.
+            error_log('Lookout: RUM render failed: '.$e->getMessage());
+        }
     }
 
     /**

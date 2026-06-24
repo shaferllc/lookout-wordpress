@@ -102,15 +102,21 @@ final class Lookout_Tracer
      */
     public static function on_query($query)
     {
-        self::$query_count++;
+        // This filter runs for every DB query: it must never alter or break the query, so all
+        // instrumentation is wrapped and the original $query is always returned untouched.
+        try {
+            self::$query_count++;
 
-        // Capture the calling code (with file/line) the first time we see each distinct query, so an
-        // N+1's offending query can point at where it originates. First-seen only, to bound cost.
-        if (defined('SAVEQUERIES') && SAVEQUERIES) {
-            $key = self::redact_sql((string) $query);
-            if (! isset(self::$query_callers[$key])) {
-                self::$query_callers[$key] = self::capture_caller_frames();
+            // Capture the calling code (with file/line) the first time we see each distinct query, so
+            // an N+1's offending query can point at where it originates. First-seen only, to bound cost.
+            if (defined('SAVEQUERIES') && SAVEQUERIES) {
+                $key = self::redact_sql((string) $query);
+                if (! isset(self::$query_callers[$key])) {
+                    self::$query_callers[$key] = self::capture_caller_frames();
+                }
             }
+        } catch (Throwable $e) {
+            // Swallow: telemetry must never affect a query.
         }
 
         return $query;
@@ -223,18 +229,22 @@ final class Lookout_Tracer
      */
     public static function on_http_finish($response, $context = '', $transport = '', $args = [], string $url = ''): void
     {
-        $start = array_pop(self::$http_starts);
-        if ($start === null) {
-            return;
-        }
-        $end = microtime(true);
-        $host = (string) (wp_parse_url($url, PHP_URL_HOST) ?: 'external');
-        $status = is_array($response) && isset($response['response']['code']) ? (int) $response['response']['code'] : null;
+        try {
+            $start = array_pop(self::$http_starts);
+            if ($start === null) {
+                return;
+            }
+            $end = microtime(true);
+            $host = (string) (wp_parse_url($url, PHP_URL_HOST) ?: 'external');
+            $status = is_array($response) && isset($response['response']['code']) ? (int) $response['response']['code'] : null;
 
-        self::$child_spans[] = self::span('http.client', $host, $start, $end, [
-            'http.url' => $url,
-            'http.status_code' => $status,
-        ]);
+            self::$child_spans[] = self::span('http.client', $host, $start, $end, [
+                'http.url' => $url,
+                'http.status_code' => $status,
+            ]);
+        } catch (\Throwable $e) {
+            // Swallow: outbound-HTTP instrumentation must never break a request.
+        }
     }
 
     /**
@@ -247,6 +257,16 @@ final class Lookout_Tracer
         }
         self::$active = false;
 
+        // Runs at shutdown; never let trace assembly or sending surface an error to the request.
+        try {
+            self::flush_unsafe();
+        } catch (\Throwable $e) {
+            error_log('Lookout: trace flush failed: '.$e->getMessage());
+        }
+    }
+
+    private static function flush_unsafe(): void
+    {
         // Stop profiling before building/sending the trace so the SDK's own shutdown work is not
         // profiled; the captured profile is shipped after the page is flushed (below).
         if (class_exists('Lookout_Profiler')) {
