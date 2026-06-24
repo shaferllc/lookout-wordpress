@@ -169,8 +169,39 @@ final class Lookout_Plugin
             },
             'default' => true,
         ]);
+        register_setting('lookout', 'lookout_traces_enabled', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => true,
+        ]);
+        // CPU profiling rides on sampled traces (Excimer only; no-op without it).
+        register_setting('lookout', 'lookout_profiling_enabled', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => true,
+        ]);
         // Off until the site owner opts in: RUM runs in visitors' browsers, so it needs consent.
         register_setting('lookout', 'lookout_rum_enabled', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => false,
+        ]);
+        // Off by default: monitoring every WP-Cron event can be noisy; opt in per site.
+        register_setting('lookout', 'lookout_cron_monitoring', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => false,
+        ]);
+        // Off by default: the PHP warning/notice stream can be noisy on some sites, so logs are opt-in.
+        register_setting('lookout', 'lookout_logs_enabled', [
             'type' => 'boolean',
             'sanitize_callback' => function ($v): bool {
                 return $v === true || $v === 1 || $v === '1';
@@ -407,24 +438,110 @@ final class Lookout_Plugin
      */
     private function base_context(): array
     {
-        global $wp_version;
+        // The heavy, slow-changing environment snapshot is cached; per-request flags are live.
+        $ctx = self::environment_context();
 
-        $ctx = [
-            'platform' => 'wordpress',
-            'wordpress_version' => is_string($wp_version ?? null) ? $wp_version : '',
-            'php_version' => PHP_VERSION,
-            'is_admin' => is_admin(),
-            'is_ajax' => wp_doing_ajax(),
-            'doing_cron' => wp_doing_cron(),
-        ];
-
+        $ctx['is_admin'] = is_admin();
+        $ctx['is_ajax'] = wp_doing_ajax();
+        $ctx['doing_cron'] = wp_doing_cron();
+        if (function_exists('is_ssl')) {
+            $ctx['is_ssl'] = is_ssl();
+        }
         if (defined('WP_CLI') && WP_CLI) {
             $ctx['wp_cli'] = true;
         }
-
         if (is_multisite()) {
             $ctx['blog_id'] = get_current_blog_id();
         }
+
+        return $ctx;
+    }
+
+    /**
+     * Public accessor for the cached environment snapshot, so the tracer can attach it to traces
+     * (and trace-derived issues like N+1 inherit the same environment detail as error events).
+     *
+     * @return array<string, mixed>
+     */
+    public static function environment_snapshot(): array
+    {
+        return self::environment_context();
+    }
+
+    /**
+     * Slow-changing environment snapshot (versions, server, plugins). Cached in a transient and
+     * memoized so frequent events (e.g. 404 floods) don't re-read plugin headers every time.
+     *
+     * @return array<string, mixed>
+     */
+    private static function environment_context(): array
+    {
+        static $memo = null;
+        if (is_array($memo)) {
+            return $memo;
+        }
+        $cached = get_transient('lookout_env_context');
+        if (is_array($cached)) {
+            $memo = $cached;
+
+            return $memo;
+        }
+
+        $memo = self::build_environment_context();
+        set_transient('lookout_env_context', $memo, defined('HOUR_IN_SECONDS') ? HOUR_IN_SECONDS : 3600);
+
+        return $memo;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function build_environment_context(): array
+    {
+        global $wp_version, $wpdb;
+
+        $wpVersion = is_string($wp_version ?? null) ? $wp_version : '';
+
+        $ctx = [
+            'platform' => 'wordpress',
+            'framework' => 'WordPress',
+            'framework_version' => $wpVersion,
+            'wordpress_version' => $wpVersion,
+            'php_version' => PHP_VERSION,
+            'sdk' => [
+                'name' => 'lookout-wordpress',
+                'version' => defined('LOOKOUT_VERSION') ? LOOKOUT_VERSION : null,
+            ],
+            'wordpress' => array_filter([
+                'version' => $wpVersion,
+                'multisite' => is_multisite(),
+                'environment' => function_exists('wp_get_environment_type') ? wp_get_environment_type() : null,
+                'debug' => defined('WP_DEBUG') && WP_DEBUG,
+                'locale' => function_exists('get_locale') ? get_locale() : null,
+                'memory_limit' => defined('WP_MEMORY_LIMIT') ? WP_MEMORY_LIMIT : null,
+                'permalinks' => (string) get_option('permalink_structure') !== '' ? get_option('permalink_structure') : 'plain',
+                'site_url' => function_exists('site_url') ? site_url() : null,
+            ], static fn ($v): bool => $v !== null),
+            'runtime' => array_filter([
+                'php_version' => PHP_VERSION,
+                'sapi' => PHP_SAPI,
+                'memory_limit' => ini_get('memory_limit') ?: null,
+                'max_execution_time' => ini_get('max_execution_time') ?: null,
+                'os' => PHP_OS,
+                'extensions' => array_values(array_intersect(
+                    ['opcache', 'redis', 'memcached', 'apcu', 'imagick', 'gd', 'curl', 'mbstring', 'intl', 'mysqli'],
+                    get_loaded_extensions()
+                )),
+            ], static fn ($v): bool => $v !== null),
+            'server' => array_filter([
+                'software' => isset($_SERVER['SERVER_SOFTWARE']) ? (string) $_SERVER['SERVER_SOFTWARE'] : null,
+                'protocol' => isset($_SERVER['SERVER_PROTOCOL']) ? (string) $_SERVER['SERVER_PROTOCOL'] : null,
+            ], static fn ($v): bool => $v !== null),
+            'database' => array_filter([
+                'server_version' => isset($wpdb) && method_exists($wpdb, 'db_version') ? $wpdb->db_version() : null,
+                'charset' => isset($wpdb->charset) && $wpdb->charset !== '' ? $wpdb->charset : null,
+            ], static fn ($v): bool => $v !== null),
+        ];
 
         if (function_exists('wp_get_theme')) {
             $theme = wp_get_theme();
@@ -434,6 +551,10 @@ final class Lookout_Plugin
                 if (is_string($version) && $version !== '') {
                     $ctx['theme_version'] = $version;
                 }
+                $parent = $theme->parent();
+                if ($parent && $parent->exists()) {
+                    $ctx['theme_parent'] = $parent->get_stylesheet();
+                }
             }
         }
 
@@ -441,8 +562,50 @@ final class Lookout_Plugin
         if ($plugins !== []) {
             $ctx['plugins'] = $plugins;
         }
+        $details = self::active_plugins_detailed();
+        if ($details !== []) {
+            $ctx['plugin_details'] = $details;
+        }
 
         return $ctx;
+    }
+
+    /**
+     * Active plugins with their names and versions. Heavier than {@see active_plugins_inventory()}
+     * (reads plugin headers), so it only runs behind the cached environment snapshot.
+     *
+     * @return list<array{name: string, version: string, slug: string}>
+     */
+    private static function active_plugins_detailed(): array
+    {
+        if (! defined('ABSPATH') || ! function_exists('get_plugin_data')) {
+            $file = ABSPATH.'wp-admin/includes/plugin.php';
+            if (defined('ABSPATH') && is_readable($file)) {
+                require_once $file;
+            }
+        }
+        if (! function_exists('get_plugin_data') || ! defined('WP_PLUGIN_DIR')) {
+            return [];
+        }
+
+        $out = [];
+        foreach (self::active_plugins_inventory() as $slug) {
+            $path = WP_PLUGIN_DIR.'/'.$slug;
+            if (! is_readable($path)) {
+                continue;
+            }
+            $data = get_plugin_data($path, false, false);
+            $out[] = [
+                'slug' => $slug,
+                'name' => isset($data['Name']) && is_string($data['Name']) && $data['Name'] !== '' ? $data['Name'] : $slug,
+                'version' => isset($data['Version']) && is_string($data['Version']) ? $data['Version'] : '',
+            ];
+            if (count($out) >= 100) {
+                break;
+            }
+        }
+
+        return $out;
     }
 
     /**

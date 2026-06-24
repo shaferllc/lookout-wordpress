@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Remote ingest config (GET /api/config) consumer.
  *
@@ -7,8 +8,6 @@
  * config (which signals are enabled and at what sample rate), caches it in a transient,
  * and honors it locally. Fails open to conservative local defaults when the config
  * cannot be fetched, but always honors a cached "disabled".
- *
- * @package Lookout
  */
 
 declare(strict_types=1);
@@ -35,6 +34,7 @@ final class Lookout_Config
      */
     private const DEFAULTS = [
         'errors' => ['enabled' => true, 'sample_rate' => 1.0],
+        'logs' => ['enabled' => true, 'sample_rate' => 1.0],
         'traces' => ['enabled' => true, 'sample_rate' => 0.1],
         'rum' => ['enabled' => true, 'sample_rate' => 0.1],
     ];
@@ -82,7 +82,8 @@ final class Lookout_Config
 
     /**
      * Keep with probability $rate. Pure so it is trivially correct: 0 never keeps,
-     * >=1 always keeps, otherwise a uniform draw in [0,1).
+     * >=1 always keeps, otherwise a uniform draw in [0,1). Uses core mt_rand (not the
+     * pluggable wp_rand) so it is safe to call during early plugin load.
      */
     public static function roll(float $rate): bool
     {
@@ -93,7 +94,7 @@ final class Lookout_Config
             return true;
         }
 
-        return (wp_rand(0, 999999) / 1000000) < $rate;
+        return (mt_rand() / mt_getrandmax()) < $rate;
     }
 
     /**
@@ -157,14 +158,20 @@ final class Lookout_Config
             return null;
         }
 
-        $response = wp_remote_get($base.'/api/config', [
+        $url = $base.'/api/config';
+        $args = [
             'timeout' => 2,
             'blocking' => true,
             'headers' => [
                 'Accept' => 'application/json',
                 'X-Api-Key' => $api_key,
             ],
-        ]);
+        ];
+
+        /** Same request-args filter as sends, so SSL/proxy customizations apply to config too. */
+        $args = apply_filters('lookout_remote_post_args', $args, [], $url);
+
+        $response = wp_remote_get($url, $args);
 
         if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
             return null;
