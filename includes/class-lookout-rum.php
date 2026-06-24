@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Real User Monitoring beacon injector.
  *
@@ -12,8 +13,6 @@
  * the remote `rum` signal being enabled, and never injected into wp-admin. The beacon uses
  * keepalive fetch (not sendBeacon) so it can set X-Lookout-Client-Sampled and the server does
  * not double-sample.
- *
- * @package Lookout
  */
 
 declare(strict_types=1);
@@ -59,6 +58,9 @@ final class Lookout_Rum
             'key' => (string) get_option('lookout_api_key', ''),
             'env' => (string) get_option('lookout_environment', 'production'),
             'rate' => Lookout_Config::sample_rate('rum'),
+            // Client suppression keys for ignored errors; the browser drops matching JS errors before
+            // sending. Computed with the same recipe as the server (WebCrypto SHA-256 in the snippet).
+            'suppress' => array_keys(Lookout_Config::suppressed_keys()),
         ];
     }
 
@@ -70,8 +72,8 @@ final class Lookout_Rum
             }
 
             $config = wp_json_encode(self::script_config());
-            echo "<script>(function(){var c=".$config.";".self::snippet().'})();</script>';
-        } catch (\Throwable $e) {
+            echo '<script>(function(){var c='.$config.';'.self::snippet().'})();</script>';
+        } catch (Throwable $e) {
             // Never let beacon injection break the page footer.
             error_log('Lookout: RUM render failed: '.$e->getMessage());
         }
@@ -93,11 +95,42 @@ function post(url,body,sampledHeader){
     fetch(url,{method:'POST',headers:h,body:JSON.stringify(body),keepalive:true,credentials:'omit'});
   }catch(e){}
 }
+function normSupp(s){
+  s=String(s==null?'':s).trim().toLowerCase();
+  s=s.replace(/[ \t\n\r\f\v]+/g,' ');
+  s=s.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g,'<id>');
+  s=s.replace(/[0-9a-z]{12,}/g,'<id>');
+  s=s.replace(/\b0x[0-9a-f]+\b/g,'<n>');
+  s=s.replace(/\d+/g,'<n>');
+  return Array.from(s.trim()).slice(0,200).join('');
+}
+// Compute the shared client suppression key (lkt_supp_v1), then call cb(key) — or cb(null) when
+// WebCrypto is unavailable (insecure context), in which case we fail open and still report.
+function suppKey(cls,msg,cb){
+  try{
+    var data='lkt_supp_v1|'+String(cls==null?'':cls).trim().toLowerCase()+'|'+normSupp(msg);
+    if(typeof crypto==='undefined'||!crypto.subtle||typeof TextEncoder==='undefined'){cb(null);return;}
+    crypto.subtle.digest('SHA-256',new TextEncoder().encode(data)).then(function(buf){
+      var b=new Uint8Array(buf),hex='';
+      for(var i=0;i<b.length;i++){hex+=('0'+b[i].toString(16)).slice(-2);}
+      cb(hex.slice(0,32));
+    }).catch(function(){cb(null);});
+  }catch(e){cb(null);}
+}
 function reportError(msg,src,stack){
-  if(sent>=10){return;}sent++;
-  post(c.errors,{api_key:c.key,message:String(msg||'Script error').slice(0,2000),exception_class:'JavaScriptError',
+  if(sent>=10){return;}
+  var body={api_key:c.key,message:String(msg||'Script error').slice(0,2000),exception_class:'JavaScriptError',
     level:'error',language:'js',environment:c.env,url:location.href,file:src||location.href,
-    stack_trace:String(stack||'').slice(0,20000)});
+    stack_trace:String(stack||'').slice(0,20000)};
+  var supp=c.suppress;
+  if(supp&&supp.length){
+    suppKey(body.exception_class,body.message,function(k){
+      if(k&&supp.indexOf(k)>=0){return;}
+      sent++;post(c.errors,body);
+    });
+  }else{
+    sent++;post(c.errors,body);
+  }
 }
 window.addEventListener('error',function(e){reportError(e&&e.message,e&&e.filename,e&&e.error&&e.error.stack);});
 window.addEventListener('unhandledrejection',function(e){var r=e&&e.reason;reportError(r&&r.message||r,location.href,r&&r.stack);});

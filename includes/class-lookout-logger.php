@@ -84,21 +84,27 @@ final class Lookout_Logger
         // non-fatal stream so the two never duplicate.
         $fatal = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR];
 
-        if (self::$active
-            && ! in_array($errno, $fatal, true)
-            && count(self::$buffer) < self::MAX_ENTRIES
-            && ! Lookout_Client::is_sending()
-        ) {
-            self::$buffer[] = [
-                'level' => self::level_for($errno),
-                'message' => self::format_message($message, $file, $line),
-                'logger' => 'php',
-                'attributes' => array_filter([
-                    'php.errno' => self::label_for($errno),
-                    'file' => $file !== '' ? $file : null,
-                    'line' => $line > 0 ? $line : null,
-                ], static fn ($v): bool => $v !== null),
-            ];
+        // Guarded: an error handler that throws breaks PHP's error handling, so capture failures are
+        // swallowed and we always fall through to chaining the previous handler.
+        try {
+            if (self::$active
+                && ! in_array($errno, $fatal, true)
+                && count(self::$buffer) < self::MAX_ENTRIES
+                && ! Lookout_Client::is_sending()
+            ) {
+                self::$buffer[] = [
+                    'level' => self::level_for($errno),
+                    'message' => self::format_message($message, $file, $line),
+                    'logger' => 'php',
+                    'attributes' => array_filter([
+                        'php.errno' => self::label_for($errno),
+                        'file' => $file !== '' ? $file : null,
+                        'line' => $line > 0 ? $line : null,
+                    ], static fn ($v): bool => $v !== null),
+                ];
+            }
+        } catch (Throwable $e) {
+            // Swallow: never let log capture disrupt PHP error handling.
         }
 
         return self::chain($errno, $message, $file, $line);
@@ -123,29 +129,33 @@ final class Lookout_Logger
         $entries = self::$buffer;
         self::$buffer = [];
 
-        $environment = (string) get_option('lookout_environment', 'production');
-        $hostname = self::hostname();
+        try {
+            $environment = (string) get_option('lookout_environment', 'production');
+            $hostname = self::hostname();
 
-        $payload = ['entries' => []];
-        foreach ($entries as $entry) {
-            $payload['entries'][] = array_filter([
-                'message' => $entry['message'],
-                'level' => $entry['level'],
-                'logger' => $entry['logger'],
-                'source' => 'php',
-                'environment' => $environment,
-                'hostname' => $hostname,
-                'attributes' => $entry['attributes'] !== [] ? $entry['attributes'] : null,
-            ], static fn ($v): bool => $v !== null && $v !== '');
+            $payload = ['entries' => []];
+            foreach ($entries as $entry) {
+                $payload['entries'][] = array_filter([
+                    'message' => $entry['message'],
+                    'level' => $entry['level'],
+                    'logger' => $entry['logger'],
+                    'source' => 'php',
+                    'environment' => $environment,
+                    'hostname' => $hostname,
+                    'attributes' => $entry['attributes'] !== [] ? $entry['attributes'] : null,
+                ], static fn ($v): bool => $v !== null && $v !== '');
+            }
+
+            // Hand the page to the visitor before the blocking send (FPM only); harmless no-op if the
+            // tracer already flushed on this request.
+            if (function_exists('fastcgi_finish_request')) {
+                fastcgi_finish_request();
+            }
+
+            Lookout_Client::send_logs($payload);
+        } catch (Throwable $e) {
+            error_log('Lookout: log flush failed: '.$e->getMessage());
         }
-
-        // Hand the page to the visitor before the blocking send (FPM only); harmless no-op if the
-        // tracer already flushed on this request.
-        if (function_exists('fastcgi_finish_request')) {
-            fastcgi_finish_request();
-        }
-
-        Lookout_Client::send_logs($payload);
     }
 
     /**

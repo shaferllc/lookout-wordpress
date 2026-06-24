@@ -14,9 +14,21 @@ final class Lookout_Client
 {
     private static bool $sending = false;
 
+    private static ?string $last_occurrence_id = null;
+
     public static function is_sending(): bool
     {
         return self::$sending;
+    }
+
+    /**
+     * Server-assigned occurrence id of the most recently reported error this request, or null. Lets a
+     * custom error page / wp_die handler link user feedback to the exact occurrence (parity with the
+     * Laravel SDK's lookout_last_error_occurrence_uuid()).
+     */
+    public static function last_occurrence_id(): ?string
+    {
+        return self::$last_occurrence_id;
     }
 
     /**
@@ -70,7 +82,13 @@ final class Lookout_Client
          */
         $args = apply_filters('lookout_remote_post_args', $args, $payload, $url);
 
-        wp_remote_post($url, $args);
+        $response = wp_remote_post($url, $args);
+        if (! is_wp_error($response)) {
+            $decoded = json_decode((string) wp_remote_retrieve_body($response), true);
+            if (is_array($decoded) && isset($decoded['id']) && is_string($decoded['id'])) {
+                self::$last_occurrence_id = $decoded['id'];
+            }
+        }
 
         self::$sending = false;
     }
@@ -225,6 +243,58 @@ final class Lookout_Client
         wp_remote_post($url, $args);
     }
 
+    /**
+     * POST sent-mail metadata to /api/ingest/mail.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public static function send_mail(array $payload): void
+    {
+        self::post_blocking('/api/ingest/mail', $payload);
+    }
+
+    /**
+     * POST custom metric entries to /api/ingest/metric.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public static function send_metrics(array $payload): void
+    {
+        self::post_blocking('/api/ingest/metric', $payload);
+    }
+
+    /**
+     * Shared blocking JSON POST for the low-volume signal endpoints (mail, metrics).
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private static function post_blocking(string $path, array $payload): void
+    {
+        $api_key = (string) get_option('lookout_api_key', '');
+        $base = rtrim((string) get_option('lookout_base_url', ''), '/');
+
+        if ($api_key === '' || $base === '' || self::should_skip_for_same_host($base)) {
+            return;
+        }
+
+        $url = $base.$path;
+        $args = [
+            'timeout' => 3,
+            'blocking' => true,
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+                'X-Api-Key' => $api_key,
+            ],
+            'body' => wp_json_encode($payload),
+        ];
+
+        /** This filter is documented on lookout_remote_post_args. */
+        $args = apply_filters('lookout_remote_post_args', $args, $payload, $url);
+
+        wp_remote_post($url, $args);
+    }
+
     private static function should_skip_for_same_host(string $base): bool
     {
         $ingest_host = wp_parse_url($base, PHP_URL_HOST);
@@ -234,5 +304,16 @@ final class Lookout_Client
         }
 
         return strcasecmp($ingest_host, $site_host) === 0;
+    }
+}
+
+if (! function_exists('lookout_last_occurrence_id')) {
+    /**
+     * The Lookout occurrence id of the most recent error reported this request (or null). Use it to
+     * link a user-feedback form to the exact occurrence.
+     */
+    function lookout_last_occurrence_id(): ?string
+    {
+        return class_exists('Lookout_Client') ? Lookout_Client::last_occurrence_id() : null;
     }
 }

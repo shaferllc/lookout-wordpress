@@ -43,6 +43,13 @@ final class Lookout_Tracer
     /** @var list<array<string, mixed>> Collected child spans (db, http) built during the request. */
     private static array $child_spans = [];
 
+    /** Main template render: basename + start (template_include) + end (wp_footer). */
+    private static string $template_name = '';
+
+    private static float $template_start = 0.0;
+
+    private static float $template_end = 0.0;
+
     /**
      * Decide sampling once and, if kept, wire up the per-request collectors. Safe to call early
      * (plugin load): lifecycle hooks fire afterwards. No-op on unsampled requests.
@@ -93,7 +100,36 @@ final class Lookout_Tracer
         }
         add_filter('pre_http_request', [self::class, 'on_http_start'], 10, 3);
         add_action('http_api_debug', [self::class, 'on_http_finish'], 10, 5);
+        // Main template render: starts when WP resolves the template, ends at the footer.
+        add_filter('template_include', [self::class, 'on_template'], PHP_INT_MAX);
+        add_action('wp_footer', [self::class, 'on_footer'], PHP_INT_MAX);
         add_action('shutdown', [self::class, 'flush'], PHP_INT_MAX);
+    }
+
+    /**
+     * @param  mixed  $template
+     * @return mixed
+     */
+    public static function on_template($template)
+    {
+        // This is the filter that picks the template to load: always return it unchanged.
+        try {
+            if (self::$template_start === 0.0) {
+                self::$template_start = microtime(true);
+                self::$template_name = is_string($template) ? basename($template) : '';
+            }
+        } catch (Throwable $e) {
+            // Swallow.
+        }
+
+        return $template;
+    }
+
+    public static function on_footer(): void
+    {
+        if (self::$template_end === 0.0) {
+            self::$template_end = microtime(true);
+        }
     }
 
     /**
@@ -242,7 +278,7 @@ final class Lookout_Tracer
                 'http.url' => $url,
                 'http.status_code' => $status,
             ]);
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             // Swallow: outbound-HTTP instrumentation must never break a request.
         }
     }
@@ -260,7 +296,7 @@ final class Lookout_Tracer
         // Runs at shutdown; never let trace assembly or sending surface an error to the request.
         try {
             self::flush_unsafe();
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             error_log('Lookout: trace flush failed: '.$e->getMessage());
         }
     }
@@ -290,6 +326,10 @@ final class Lookout_Tracer
             $spans[] = $phase;
         }
         $spans[] = self::db_span($end, $db);
+        $view = self::view_span($end);
+        if ($view !== null) {
+            $spans[] = $view;
+        }
         foreach (self::$child_spans as $child) {
             $spans[] = $child;
         }
@@ -402,6 +442,25 @@ final class Lookout_Tracer
         }
 
         return $spans;
+    }
+
+    /**
+     * The main template render span (template_include → footer), tagged with the template basename,
+     * so the waterfall shows which theme template rendered and how long it took. Null when no
+     * front-end template rendered (e.g. REST/admin/AJAX).
+     *
+     * @return array<string, mixed>|null
+     */
+    private static function view_span(float $end): ?array
+    {
+        if (self::$template_start <= 0.0 || self::$template_name === '') {
+            return null;
+        }
+        $finish = self::$template_end > self::$template_start ? self::$template_end : $end;
+
+        return self::span('view.render', self::$template_name, self::$template_start, $finish, [
+            'view.template' => self::$template_name,
+        ]);
     }
 
     /**

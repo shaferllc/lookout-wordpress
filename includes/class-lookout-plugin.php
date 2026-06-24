@@ -98,7 +98,7 @@ final class Lookout_Plugin
                     ],
                 ]),
             ]);
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             error_log('Lookout: failed to report 404: '.$e->getMessage());
         }
     }
@@ -374,6 +374,13 @@ final class Lookout_Plugin
                 $payload['user'] = $user;
             }
 
+            if (class_exists('Lookout_Breadcrumbs')) {
+                $crumbs = Lookout_Breadcrumbs::all();
+                if ($crumbs !== []) {
+                    $payload['breadcrumbs'] = $crumbs;
+                }
+            }
+
             Lookout_Client::send($payload);
         } catch (Throwable $e) {
             error_log('Lookout: failed to report fatal: '.$e->getMessage());
@@ -404,6 +411,13 @@ final class Lookout_Plugin
         $user = $this->current_user_payload();
         if ($user !== null) {
             $payload['user'] = $user;
+        }
+
+        if (class_exists('Lookout_Breadcrumbs')) {
+            $crumbs = Lookout_Breadcrumbs::all();
+            if ($crumbs !== []) {
+                $payload['breadcrumbs'] = $crumbs;
+            }
         }
 
         return $payload;

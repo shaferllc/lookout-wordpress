@@ -76,6 +76,15 @@ final class Lookout_Cron_Monitor
 
     public static function attach_due_event_monitors(): void
     {
+        try {
+            self::attach_due_event_monitors_unsafe();
+        } catch (Throwable $e) {
+            error_log('Lookout: cron monitor attach failed: '.$e->getMessage());
+        }
+    }
+
+    private static function attach_due_event_monitors_unsafe(): void
+    {
         if (! function_exists('_get_cron_array')) {
             return;
         }
@@ -121,43 +130,52 @@ final class Lookout_Cron_Monitor
      */
     public static function on_start(string $hook, ?array $config): void
     {
-        if (isset(self::$in_flight[$hook])) {
-            return; // A burst of same-hook events counts as one logical run.
-        }
+        // Wraps a real cron callback; never let the check-in break the task it monitors.
+        try {
+            if (isset(self::$in_flight[$hook])) {
+                return; // A burst of same-hook events counts as one logical run.
+            }
 
-        $payload = [
-            'slug' => self::slug_for($hook),
-            'status' => 'in_progress',
-            'environment' => (string) get_option('lookout_environment', 'production'),
-        ];
-        if ($config !== null) {
-            $payload['monitor_config'] = $config;
-        }
+            $payload = [
+                'slug' => self::slug_for($hook),
+                'status' => 'in_progress',
+                'environment' => (string) get_option('lookout_environment', 'production'),
+            ];
+            if ($config !== null) {
+                $payload['monitor_config'] = $config;
+            }
 
-        $id = Lookout_Client::send_cron($payload);
-        self::$in_flight[$hook] = ['id' => $id, 'start' => microtime(true)];
+            $id = Lookout_Client::send_cron($payload);
+            self::$in_flight[$hook] = ['id' => $id, 'start' => microtime(true)];
+        } catch (Throwable $e) {
+            error_log('Lookout: cron check-in (start) failed: '.$e->getMessage());
+        }
     }
 
     public static function on_finish(string $hook, string $status): void
     {
-        if (! isset(self::$in_flight[$hook])) {
-            return;
+        try {
+            if (! isset(self::$in_flight[$hook])) {
+                return;
+            }
+
+            $entry = self::$in_flight[$hook];
+            unset(self::$in_flight[$hook]);
+
+            $payload = [
+                'slug' => self::slug_for($hook),
+                'status' => $status,
+                'environment' => (string) get_option('lookout_environment', 'production'),
+                'duration' => round(max(0.0, microtime(true) - $entry['start']), 3),
+            ];
+            if (is_string($entry['id']) && $entry['id'] !== '') {
+                $payload['check_in_id'] = $entry['id'];
+            }
+
+            Lookout_Client::send_cron($payload);
+        } catch (Throwable $e) {
+            error_log('Lookout: cron check-in (finish) failed: '.$e->getMessage());
         }
-
-        $entry = self::$in_flight[$hook];
-        unset(self::$in_flight[$hook]);
-
-        $payload = [
-            'slug' => self::slug_for($hook),
-            'status' => $status,
-            'environment' => (string) get_option('lookout_environment', 'production'),
-            'duration' => round(max(0.0, microtime(true) - $entry['start']), 3),
-        ];
-        if (is_string($entry['id']) && $entry['id'] !== '') {
-            $payload['check_in_id'] = $entry['id'];
-        }
-
-        Lookout_Client::send_cron($payload);
     }
 
     /**
