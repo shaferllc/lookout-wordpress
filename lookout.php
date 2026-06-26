@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Lookout
  * Description: Send errors, fatals, 404s, performance traces, CPU profiles, PHP logs, cron check-ins, and browser RUM to Lookout.
- * Version: 0.6.0
+ * Version: 0.7.0
  * Requires at least: 6.0
  * Requires PHP: 8.0
  * Author: Lookout
@@ -17,7 +17,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('LOOKOUT_VERSION', '0.6.0');
+define('LOOKOUT_VERSION', '0.7.0');
 define('LOOKOUT_PLUGIN_FILE', __FILE__);
 define('LOOKOUT_PLUGIN_DIR', plugin_dir_path(__FILE__));
 

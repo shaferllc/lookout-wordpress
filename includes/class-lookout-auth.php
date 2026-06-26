@@ -33,11 +33,19 @@ final class Lookout_Auth
 
     private static function enabled(): bool
     {
-        if (! get_option('lookout_enabled', false) || ! get_option('lookout_auth_monitoring', false)) {
+        if (! get_option('lookout_enabled', false)) {
             return false;
         }
 
-        return (string) get_option('lookout_api_key', '') !== '' && (string) get_option('lookout_base_url', '') !== '';
+        if ((string) get_option('lookout_api_key', '') === '' || (string) get_option('lookout_base_url', '') === '') {
+            return false;
+        }
+
+        // Controlled from the dashboard via remote config (signals.auth.enabled, off by default), with
+        // the local "Authentication monitoring" setting as an offline force-on override.
+        $remote = class_exists('Lookout_Config') && Lookout_Config::is_enabled('auth');
+
+        return $remote || (bool) get_option('lookout_auth_monitoring', false);
     }
 
     /**

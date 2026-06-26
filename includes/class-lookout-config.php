@@ -37,6 +37,8 @@ final class Lookout_Config
         'logs' => ['enabled' => true, 'sample_rate' => 1.0],
         'traces' => ['enabled' => true, 'sample_rate' => 0.1],
         'rum' => ['enabled' => true, 'sample_rate' => 0.1],
+        // Opt-in: stays off until enabled from the dashboard (sensitive auth data).
+        'auth' => ['enabled' => false, 'sample_rate' => 1.0],
     ];
 
     /**
