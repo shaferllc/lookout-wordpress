@@ -184,6 +184,17 @@ $lookout_connected = get_option('lookout_enabled') && $lookout_base !== '' && $l
                     </div>
                 </div>
             </div>
+
+            <div class="lookout-field">
+                <div class="lookout-toggle">
+                    <input type="hidden" name="lookout_auth_monitoring" value="0" />
+                    <input type="checkbox" id="lookout_auth_monitoring" name="lookout_auth_monitoring" value="1" <?php checked(get_option('lookout_auth_monitoring', false)); ?> />
+                    <div class="body">
+                        <strong><?php esc_html_e('Authentication monitoring', 'lookout'); ?></strong>
+                        <span><?php esc_html_e('Report login, logout, failed-login, registration, and password-reset events to your Authentication watcher. Sends the user id and a display label (email/username) only — never passwords. Off by default.', 'lookout'); ?></span>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="lookout-actions">

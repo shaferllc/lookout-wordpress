@@ -264,6 +264,17 @@ final class Lookout_Client
     }
 
     /**
+     * POST an authentication event (login, logout, failed, registered, password_reset) to
+     * /api/ingest/auth. Never carries credentials — only the user's id and a display label.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public static function send_auth(array $payload): void
+    {
+        self::post_blocking('/api/ingest/auth', $payload);
+    }
+
+    /**
      * Shared blocking JSON POST for the low-volume signal endpoints (mail, metrics).
      *
      * @param  array<string, mixed>  $payload

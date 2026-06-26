@@ -212,6 +212,14 @@ final class Lookout_Plugin
             },
             'default' => false,
         ]);
+        // Off by default: auth events carry user identity, so the site owner opts in per site.
+        register_setting('lookout', 'lookout_auth_monitoring', [
+            'type' => 'boolean',
+            'sanitize_callback' => function ($v): bool {
+                return $v === true || $v === 1 || $v === '1';
+            },
+            'default' => false,
+        ]);
     }
 
     public function render_settings_page(): void
