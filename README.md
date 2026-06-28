@@ -2,6 +2,8 @@
 
 WordPress plugin that reports **uncaught exceptions**, **shutdown fatals** (E_ERROR, E_PARSE, etc.), and optional **test events** to Lookout via `POST /api/ingest` with your **project API key**.
 
+**Free dashboard:** [Create a free Starter account](https://uselookout.app/register) (no credit card) — one project, thousands of events/month. Copy your project API key from Settings and view grouped errors in the web UI.
+
 **Monorepo path:** `packages/lookout-wordpress/`. Optional **git subtree** mirror when `SPLIT_LOOKOUT_WORDPRESS_REPO` is set (see `.github/workflows/package-split.yml`).
 
 ## Requirements
